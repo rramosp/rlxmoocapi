@@ -9,5 +9,5 @@ setup(name='rlxmoocapi',
       author_email='raul.ramos@udea.edu.co',
       url='https://github.com/rramosp/rlxmoocapi',
       packages = ['rlxmoocapi',],
-      install_requires = ['distutils', 'numpy']
+      install_requires = ['numpy']
      )
