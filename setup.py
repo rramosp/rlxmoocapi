@@ -8,4 +8,5 @@ setup(name='rlxmoocapi',
       author='raul ramos',
       author_email='raul.ramos@udea.edu.co',
       url='https://github.com/rramosp/rlxmoocapi',
+      packages = ['rlxmoocapi']
      )
