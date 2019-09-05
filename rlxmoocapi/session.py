@@ -1,4 +1,5 @@
-import requests, json, getpass
+import requests, json, getpass, inspect
+from IPython.core.display import display, HTML
 
 class Session:
     
@@ -37,24 +38,30 @@ class Session:
     def do_head(self, url, data=None, loggedin_required=True):
             return self.do(requests.head, url, data, loggedin_required)        
 
-    def login(self, user=None, pwd=None):
-        if user is None:
-            user = input("username: ")
+    def login(self, user_id=None, pwd=None, course_id=None, lab_id=None):
+        if user_id is None:
+            user_id = input("username: ")
         if pwd is None:
             pwd = getpass.getpass("password: ")
 
-        data = {"user_id": user, "user_pwd": pwd}
+        data = {"user_id": user_id, "user_pwd": pwd}
         resp = self.do_post("login", data, loggedin_required=False)
         self.token = eval(resp.content)["Mooc-Token"]
-        self.user = user
+        self.user_id = user_id
+
+        if course_id is not None:
+            self.course = self.get_user_course(course_id)
+        self.course_id = course_id
+        self.lab_id = lab_id
+
         return self
         
-    def create_user(self, user, pwd, name):
-        data = {"user_id": user, "user_name": name, "user_pwd": pwd}
+    def create_user(self, user_id, pwd, user_name):
+        data = {"user_id": user_id, "user_name": user_name, "user_pwd": pwd}
         self.do_post("users", data)
 
-    def get_user(self, user):
-        resp = self.do_get("users/%s"%user)
+    def get_user(self, user_id):
+        resp = self.do_get("users/%s"%user_id)
         if resp.status_code==200:
             return eval(resp.content.decode())
 
@@ -95,25 +102,29 @@ class Session:
         self.do_post("users/%s/courses"%user_id, data)
         
     def delete_user_course(self, course_id, user_id):
-        user_id = user_id if user_id is not None else self.user
+        user_id = user_id if user_id is not None else self.user_id
         self.do_delete("users/%s/courses/%s"%(user_id, course_id))
         
     def get_user_course(self, course_id, user_id=None):
-        user_id = user_id if user_id is not None else self.user
+        user_id = user_id if user_id is not None else self.user_id
         resp = self.do_get("users/%s/courses/%s"%(user_id, course_id))
         if resp.status_code==200:
             return eval(resp.content.decode())
 
     def user_course_exists(self, course_id, user_id=None):
-        user_id = user_id if user_id is not None else self.user
+        user_id = user_id if user_id is not None else self.user_id
         resp = self.do_get("users/%s/courses/%s/exists"%(user_id, course_id))
         if resp.status_code==200:
             return eval(resp.content.decode())["result"]==str(True)
 
-    def set_grader(self, course_id, lab_id, task_id, grader_source, grader_function_name):
+    def set_grader(self, course_id, lab_id, task_id, 
+                   grader_source, grader_function_name,
+                   source_functions_names, source_variables_names):
         data = {
                   "grader_source": grader_source,
-                  "grader_function_name": grader_function_name
+                  "grader_function_name": grader_function_name,
+                  "source_functions_names": source_functions_names,
+                  "source_variables_names":source_variables_names
                 }
         self.do_post("courses/%s/labs/%s/tasks/%s/grader"%(course_id, lab_id, task_id), data)
 
@@ -122,12 +133,53 @@ class Session:
         if resp.status_code==200:
             return json.loads(resp.content.decode())
 
-    def submit_task(self, course_id, lab_id, task_id, submission_content, user_id=None):
-        user_id = user_id if user_id is not None else self.user
-        if type(submission_content)!=dict:
-            raise ValueError("submission must be a dictionary")
+    def default_course_lab(self, course_id, lab_id):
+        course_id = course_id or self.course_id
+        lab_id    = lab_id or self.lab_id
+        assert course_id is not None, "must set course_id"
+        assert lab_id is not None, "must set lab_id"
+        return course_id, lab_id
+
+    def get_grader_source_names(self, course_id=None, lab_id=None, task_id=None):
+        course_id, lab_id = self.default_course_lab(course_id, lab_id)
+        resp = self.do_get("courses/%s/labs/%s/tasks/%s/grader_source_names"%(course_id, lab_id, task_id))
+        if resp.status_code==200:
+            return json.loads(resp.content.decode())
+
+    def submit_task(self, namespace, course_id=None, lab_id=None, task_id=None, user_id=None,
+                    display_html=True):
+        """
+        call this function with namespace=globals()
+        """
+        user_id = user_id if user_id is not None else self.user_id
+        course_id, lab_id = self.default_course_lab(course_id, lab_id)
+
+        source = self.get_grader_source_names(course_id, lab_id, task_id)
+        functions = {f: inspect.getsource(namespace[f]) for f in source['source_functions_names']}
+        variables = {v: namespace[v] for v in source['source_variables_names']}
+        submission_content = { 'source_functions': functions,
+                               'source_variables': variables}
+
         data = {"submission_content": submission_content}
         resp = self.do_post("users/%s/courses/%s/labs/%s/tasks/%s"%(user_id, course_id, lab_id, task_id), data)
         if resp.status_code==200:
-           return eval(resp.content.decode()) 
+           r = eval(resp.content.decode()) 
+           if display_html:
+                s = """
+                <h2>%s submitted</h2>
+                <p/><p/>
+                <h3><font color="blue">your grade is %s</font></h3>
+                <p/><p/>
+                %s
+                <p/><p/>
+                <div style="font-size:10px"><b>SUBMISSION CODE</b> %s</div>
+
+                """%("task_01", str(r["grade"]), r["message"], r["submission_stamp"])
+                display(HTML(s))               
+           return r
+
+    def run_grader_locally(self, grader_function_name, source_functions_names, source_variables_names, namespace):
+        functions = {f: eval("inspect.getsource(%s)"%f, namespace) for f in source_functions_names}
+        variables = {v: namespace[v] for v in source_variables_names}
+        return namespace[grader_function_name](functions, variables)
 
