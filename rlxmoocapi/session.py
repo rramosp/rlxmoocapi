@@ -1,5 +1,29 @@
 import requests, json, getpass, inspect, pickle, codecs
+from time import time, sleep
 from IPython.core.display import display, HTML
+import inspect
+
+
+mf_tlastcall = None
+def maxfreq(maxlapse=5):
+    """
+    ensures function calls are at least 'maxlapse' seconds apart
+    forces sleep until 'maxlapse' happens
+    """
+    def wrapper(func):
+        def function_wrapper(*args, **kwargs):
+            global mf_tlastcall
+
+            if mf_tlastcall is not None:
+                t = time()-mf_tlastcall
+                if t<maxlapse:
+                    sleep(maxlapse-t)
+
+            mf_tlastcall = time()
+            return func(*args, **kwargs)
+
+        return function_wrapper
+    return wrapper
 
 class Session:
     
@@ -7,6 +31,7 @@ class Session:
         self.endpoint = endpoint
         self.token    = None
 
+    @maxfreq()
     def do(self, request_function, url, data=None, loggedin_required=True):
         assert not loggedin_required or self.token is not None, "must login first"
         resp = request_function(self.endpoint+"/api/"+url, json=data, 
@@ -39,7 +64,7 @@ class Session:
     def do_head(self, url, data=None, loggedin_required=True):
             return self.do(requests.head, url, data, loggedin_required)        
 
-    def login(self, user_id=None, pwd=None, course_id=None, lab_id=None):
+    def login(self, user_id=None, pwd=None, course_id=None, session_id=None, lab_id=None):
         if user_id is None:
             user_id = input("username: ")
         if pwd is None:
@@ -50,9 +75,10 @@ class Session:
         self.token = eval(resp.content)["Mooc-Token"]
         self.user_id = user_id
 
-        if course_id is not None:
-            self.course = self.get_user_course(course_id)
+        if course_id is not None and session_id is not None:
+            self.course_session = self.get_course_session(course_id, session_id)
         self.course_id = course_id
+        self.session_id = session_id
         self.lab_id = lab_id
 
         return self
@@ -97,6 +123,25 @@ class Session:
         data = {"course_spec": cspec, "owner": owner}
         self.do_post("courses", data)
 
+    def create_course_session(self, course_id, session_id, start_date):
+        data = {"course_id": course_id, "session_id": session_id, "start_date": start_date}
+        self.do_post("courses/%s/sessions"%course_id, data)
+
+    def get_course_session(self, course_id, session_id):
+        resp = self.do_get("courses/%s/sessions/%s"%(course_id, session_id))
+        if resp.status_code==200:
+            return eval(resp.content.decode())
+
+    def get_course_sessions(self, course_id):
+        resp = self.do_get("courses/%s/sessions"%(course_id))
+        if resp.status_code==200:
+            return eval(resp.content.decode())
+
+    def recompute_session_grades(self, course_id, session_id):
+        resp = self.do_post("courses/%s/sessions/%s/recompute"%(course_id, session_id))
+        if resp.status_code==200:
+            return eval(resp.content.decode())
+
     def update_course(self, cspec):
         course_id = cspec["course_id"]
         cspec = json.dumps(cspec)
@@ -113,40 +158,42 @@ class Session:
         if resp.status_code==200:
             return eval(resp.content.decode())["result"]==str(True)
 
-    def delete_course(self, course_id):
-        self.do_delete("courses/%s"%course_id)
-
-    def create_user_course(self, course_id, user_id, start_date):
-        data = {"user_id": user_id, "course_id": course_id, "start_date": start_date}
-        self.do_post("users/%s/courses"%user_id, data)
-        
-    def delete_user_course(self, course_id, user_id, delete_grades_and_submissions=False):
-        user_id = user_id if user_id is not None else self.user_id
-        data = {"delete_grades_and_submissions": str(delete_grades_and_submissions)}
-        self.do_delete("users/%s/courses/%s"%(user_id, course_id), data=data)
-
-    def get_user_courses(self, user_id=None):
-        user_id = user_id if user_id is not None else self.user_id
-        resp = self.do_get("users/%s/courses"%(user_id))
-        if resp.status_code==200:
-            return eval(resp.content.decode())
-
-    def get_user_course(self, course_id, user_id=None):
-        user_id = user_id if user_id is not None else self.user_id
-        resp = self.do_get("users/%s/courses/%s"%(user_id, course_id))
-        if resp.status_code==200:
-            return eval(resp.content.decode())
-
-    def user_course_exists(self, course_id, user_id=None):
-        user_id = user_id if user_id is not None else self.user_id
-        resp = self.do_get("users/%s/courses/%s/exists"%(user_id, course_id))
+    def course_session_exists(self, course_id, session_id):
+        resp = self.do_get("courses/%s/sessions/%s/exists"%(course_id, session_id))
         if resp.status_code==200:
             return eval(resp.content.decode())["result"]==str(True)
 
-    def get_user_course_gradetree(self, course_id=None, user_id=None):
+    def user_session_exists(self, user_id, course_id, session_id):
+        resp = self.do_get("users/%s/courses/%s/sessions/%s/exists"%(user_id, course_id, session_id))
+        if resp.status_code==200:
+            return eval(resp.content.decode())["result"]==str(True)
+
+    def delete_course(self, course_id):
+        self.do_delete("courses/%s"%course_id)
+
+    def delete_course_session(self, course_id, session_id):
+        self.do_delete("courses/%s/sessions/%s"%(course_id, session_id))
+
+    def delete_user_session(self, user_id, course_id, session_id, delete_grades_and_submissions=False):
+        data = {"delete_grades_and_submissions": str(delete_grades_and_submissions)}
+        self.do_delete("users/%s/courses/%s/sessions/%s"%(user_id, course_id, session_id), data=data)
+
+
+    def create_user_session(self, user_id, course_id, session_id):
+        data = {"session_id": session_id}
+        self.do_post("users/%s/courses/%s/sessions"%(user_id, course_id), data)
+
+    def get_user_sessions(self, user_id=None):
+        user_id = user_id if user_id is not None else self.user_id
+        resp = self.do_get("users/%s/sessions"%(user_id))
+        if resp.status_code==200:
+            return eval(resp.content.decode())
+
+    def get_user_session_gradetree(self, course_id=None, session_id=None, user_id=None):
+        session_id = session_id if session_id is not None else self.session_id
         course_id = course_id if course_id is not None else self.course_id
         user_id = user_id if user_id is not None else self.user_id
-        resp = self.do_get("users/%s/courses/%s/grade_tree"%(user_id, course_id))
+        resp = self.do_get("users/%s/courses/%s/sessions/%s/grade_tree"%(user_id, course_id, session_id))
         if resp.status_code==200:
             r = eval(resp.content.decode())
             return r
@@ -162,10 +209,26 @@ class Session:
                 }
         self.do_post("courses/%s/labs/%s/tasks/%s/grader"%(course_id, lab_id, task_id), data)
 
+    def invite(self, course_id, session_id, invitations_emails):
+        data = {
+                  "invitations_emails": invitations_emails,
+                }
+        return self.do_post("courses/%s/sessions/%s/invitations"%(course_id, session_id), data)
+
+
     def get_grader(self, course_id, lab_id, task_id):
         resp = self.do_get("courses/%s/labs/%s/tasks/%s/grader"%(course_id, lab_id, task_id))
         if resp.status_code==200:
             return json.loads(resp.content.decode())
+
+    def default_course_session_lab(self, course_id, session_id, lab_id):
+        course_id = course_id or self.course_id
+        session_id = session_id or self.session_id
+        lab_id    = lab_id or self.lab_id
+        assert course_id is not None, "must set course_id"
+        assert session_id is not None, "must set session_id"
+        assert lab_id is not None, "must set lab_id"
+        return course_id, session_id, lab_id
 
     def default_course_lab(self, course_id, lab_id):
         course_id = course_id or self.course_id
@@ -174,17 +237,18 @@ class Session:
         assert lab_id is not None, "must set lab_id"
         return course_id, lab_id
 
+
     def get_grader_source_names(self, course_id=None, lab_id=None, task_id=None):
         course_id, lab_id = self.default_course_lab(course_id, lab_id)
         resp = self.do_get("courses/%s/labs/%s/tasks/%s/grader_source_names"%(course_id, lab_id, task_id))
         if resp.status_code==200:
             return json.loads(resp.content.decode())
 
-    def get_submissions(self, course_id=None, lab_id=None, task_id=None, user_id=None, include_details=False):
+    def get_submissions(self, course_id=None, session_id=None, lab_id=None, task_id=None, user_id=None, include_details=False):
         user_id = user_id if user_id is not None else self.user_id
-        course_id, lab_id = self.default_course_lab(course_id, lab_id)
+        course_id, session_id, lab_id = self.default_course_session_lab(course_id, session_id, lab_id)
         data = {"include_details": str(include_details) }
-        resp = self.do_get("users/%s/courses/%s/labs/%s/tasks/%s/submissions"%(user_id, course_id, lab_id, task_id),
+        resp = self.do_get("users/%s/courses/%s/sessions/%s/labs/%s/tasks/%s/submissions"%(user_id, course_id, session_id, lab_id, task_id),
                            data=data)
         if resp.status_code==200:
             return json.loads(resp.content.decode())['Items']
@@ -194,24 +258,23 @@ class Session:
         course_id, lab_id = self.default_course_lab(course_id, lab_id)
         self.do_delete("users/%s/courses/%s/labs/%s/tasks/%s/submissions"%(user_id, course_id, lab_id, task_id))
 
-    def submit_task(self, namespace, course_id=None, lab_id=None, task_id=None, user_id=None,
+    def submit_task(self, namespace, course_id=None, session_id=None, lab_id=None, task_id=None, user_id=None,
                     display_html=True):
         """
         call this function with namespace=globals()
         """
         user_id = user_id if user_id is not None else self.user_id
-        course_id, lab_id = self.default_course_lab(course_id, lab_id)
+        course_id, session_id, lab_id = self.default_course_session_lab(course_id, session_id, lab_id)
 
         source = self.get_grader_source_names(course_id, lab_id, task_id)
         functions = {f: inspect.getsource(namespace[f]) for f in source['source_functions_names']}
-        # variables = {v: str(namespace[v]) for v in source['source_variables_names']}
         variables = codecs.encode(pickle.dumps({i:namespace[i] for i in source['source_variables_names']}), "base64").decode()
 
         submission_content = { 'source_functions': functions,
                                'source_variables': variables}
 
         data = {"submission_content": submission_content}
-        resp = self.do_post("users/%s/courses/%s/labs/%s/tasks/%s"%(user_id, course_id, lab_id, task_id), data)
+        resp = self.do_post("users/%s/courses/%s/sessions/%s/labs/%s/tasks/%s"%(user_id, course_id, session_id, lab_id, task_id), data)
         if resp.status_code==200:
            r = eval(resp.content.decode()) 
            gmsg = r["message"].strip()
@@ -229,9 +292,12 @@ class Session:
                 display(HTML(s))               
            return r
 
-    def print_grade_tree(self, course_id=None, user_id=None):
-        gt = self.get_user_course_gradetree(course_id, user_id)
-        ccu = Course(self.course["user_course_spec"])
+    def print_grade_tree(self, course_id=None, session_id=None, user_id=None):
+        course_id, session_id, _ = self.default_course_session_lab(course_id, session_id, None)
+        print (course_id, session_id)
+        gt = self.get_user_session_gradetree(course_id, session_id, user_id)
+        course = self.get_course(course_id)
+        ccu = Course(course["course_spec"])
         r = "+-------+----------+----------------------------+\n"
         r += "+ grade + part id  + description                +\n"
         r += "+-------+----------+----------------------------+\n"
@@ -254,7 +320,7 @@ class Session:
         # sending string through http
         dvars = codecs.encode(pickle.dumps({i:namespace[i] for i in source_variables_names}), "base64").decode()
         variables = pickle.loads(codecs.decode(dvars.encode(), "base64"))
-        return namespace[grader_function_name](functions, variables)
+        return namespace[grader_function_name](functions, variables, self.user_id)
 
     def make_backup(self):
         return self.do_get("make_backup")
